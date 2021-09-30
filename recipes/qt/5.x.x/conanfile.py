@@ -42,7 +42,7 @@ class QtConan(ConanFile):
     generators = "pkg_config"
     name = "qt"
     description = "Qt is a cross-platform framework for graphical user interfaces."
-    topics = ("conan", "qt", "ui")
+    topics = ("qt", "ui")
     url = "https://github.com/conan-io/conan-center-index"
     homepage = "https://www.qt.io"
     license = "LGPL-3.0"
@@ -131,9 +131,13 @@ class QtConan(ConanFile):
 
     def export(self):
         self.copy("qtmodules%s.conf" % self.version)
+        
+    @property    
+    def _settings_build(self):
+        return getattr(self, "settings_build", self.settings)
 
     def build_requirements(self):
-        if tools.os_info.is_windows and self.settings.compiler == "Visual Studio":
+        if self._settings_build.os == "Windows" and self.settings.compiler == "Visual Studio":
             self.build_requires("jom/1.1.3")
         if self.options.qtwebengine:
             self.build_requires("ninja/1.10.2")
@@ -256,6 +260,8 @@ class QtConan(ConanFile):
                 _enablemodule(module)
 
     def validate(self):
+        if self.settings.compiler.get_safe("cppstd"):
+            tools.check_min_cppstd(self, "11")
         if self.options.widgets and not self.options.gui:
             raise ConanInvalidConfiguration("using option qt:widgets without option qt:gui is not possible. "
                                             "You can either disable qt:widgets or enable qt:gui")
@@ -267,7 +273,7 @@ class QtConan(ConanFile):
             if not (self.options.gui and self.options.qtdeclarative and self.options.qtlocation and self.options.qtwebchannel):
                 raise ConanInvalidConfiguration("option qt:qtwebengine requires also qt:gui, qt:qtdeclarative, qt:qtlocation and qt:qtwebchannel")
 
-            if tools.cross_building(self.settings, skip_x64_x86=True):
+            if tools.cross_building(self, skip_x64_x86=True):
                 raise ConanInvalidConfiguration("Cross compiling Qt WebEngine is not supported")
 
             if self.settings.compiler == "gcc" and tools.Version(self.settings.compiler.version) < "5":
@@ -342,7 +348,7 @@ class QtConan(ConanFile):
             if self.settings.os != "Windows":
                 self.requires("odbc/2.3.9")
         if self.options.get_safe("with_openal", False):
-            self.requires("openal/1.21.0")
+            self.requires("openal/1.21.1")
         if self.options.get_safe("with_libalsa", False):
             self.requires("libalsa/1.2.4")
         if self.options.gui and self.settings.os == "Linux":
@@ -627,7 +633,7 @@ class QtConan(ConanFile):
         else:
             xplatform_val = self._xplatform()
             if xplatform_val:
-                if not tools.cross_building(self.settings, skip_x64_x86=True):
+                if not tools.cross_building(self, skip_x64_x86=True):
                     args += ["-platform %s" % xplatform_val]
                 else:
                     args += ["-xplatform %s" % xplatform_val]
@@ -825,7 +831,11 @@ Examples = bin/datadir/examples""")
             assert componentname not in self.cpp_info.components, "Module %s already present in self.cpp_info.components" % module
             self.cpp_info.components[componentname].names["cmake_find_package"] = module
             self.cpp_info.components[componentname].names["cmake_find_package_multi"] = module
-            self.cpp_info.components[componentname].libs = ["Qt5%s%s" % (module, libsuffix)]
+            if module.endswith("Private"):
+                libname = module[:-7]
+            else:
+                libname = module
+            self.cpp_info.components[componentname].libs = ["Qt5%s%s" % (libname, libsuffix)]
             self.cpp_info.components[componentname].includedirs = ["include", os.path.join("include", "Qt%s" % module)]
             self.cpp_info.components[componentname].defines = ["QT_%s_LIB" % module.upper()]
             if module != "Core" and "Core" not in requires:
@@ -888,6 +898,30 @@ Examples = bin/datadir/examples""")
             if self.options.with_libjpeg == "libjpeg":
                 gui_reqs.append("libjpeg::libjpeg")
             _create_module("Gui", gui_reqs)
+
+            if self.settings.os == "Windows":
+                _create_plugin("QWindowsIntegrationPlugin", "qwindows", "platforms", ["Core", "Gui"])
+                self.cpp_info.components["qtQWindowsIntegrationPlugin"].system_libs = ["advapi32", "dwmapi", "gdi32", "imm32",
+                    "ole32", "oleaut32", "shell32", "shlwapi", "user32", "winmm", "winspool", "wtsapi32"]
+            elif self.settings.os == "Android":
+                _create_plugin("QAndroidIntegrationPlugin", "qtforandroid", "platforms", ["Core", "Gui"])
+                self.cpp_info.components["qtQAndroidIntegrationPlugin"].system_libs = ["android", "jnigraphics"]
+            elif self.settings.os == "Macos":
+                _create_plugin("QCocoaIntegrationPlugin", "qcocoa", "platforms", ["Core", "Gui"])
+                self.cpp_info.components["QCocoaIntegrationPlugin"].frameworks = ["AppKit", "Carbon", "CoreServices", "CoreVideo",
+                    "IOKit", "IOSurface", "Metal", "QuartzCore"]
+            elif self.settings.os in ["iOS", "tvOS"]:
+                _create_plugin("QIOSIntegrationPlugin", "qios", "platforms", [])
+                self.cpp_info.components["QIOSIntegrationPlugin"].frameworks = ["AudioToolbox", "Foundation", "Metal",
+                    "QuartzCore", "UIKit"]
+            elif self.settings.os == "watchOS":
+                _create_plugin("QMinimalIntegrationPlugin", "qminimal", "platforms", [])
+            elif self.settings.os == "Emscripten":
+                _create_plugin("QWasmIntegrationPlugin", "qwasm", "platforms", ["Core", "Gui"])
+            else:
+                _create_module("XcbQpaPrivate", ["xkbcommon::libxkbcommon-x11", "xorg::xorg"])
+                _create_plugin("QXcbIntegrationPlugin", "qxcb", "platforms", ["Core", "Gui", "XcbQpaPrivate"])
+
         if self.options.with_sqlite3:
             _create_plugin("QSQLiteDriverPlugin", "qsqlite", "sqldrivers", ["sqlite3::sqlite3"])
         if self.options.with_pq:
@@ -977,7 +1011,10 @@ Examples = bin/datadir/examples""")
             _create_module("WebChannel", ["Qml"])
 
         if self.options.qtwebengine:
-            _create_module("WebEngineCore", ["Gui", "Quick", "WebChannel", "Positioning", "expat::expat", "opus::libopus"])
+            webenginereqs = ["Gui", "Quick", "WebChannel", "Positioning"]
+            if self.settings.os == "Linux":
+                webenginereqs.extend(["expat::expat", "opus::libopus"])
+            _create_module("WebEngineCore", webenginereqs)
             _create_module("WebEngine", ["WebEngineCore"])
             _create_module("WebEngineWidgets", ["WebEngineCore", "Quick", "PrintSupport", "Widgets", "Gui", "Network"])
 
@@ -1099,6 +1136,18 @@ Examples = bin/datadir/examples""")
 
         if self.options.qtxmlpatterns:
              _create_module("XmlPatterns", ["Network"])
+        
+        if self.options.qtactiveqt:
+            _create_module("AxBase", ["Gui", "Widgets"])
+            self.cpp_info.components["qtAxBase"].includedirs = ["include", os.path.join("include", "ActiveQt")]
+            self.cpp_info.components["qtAxBase"].system_libs.extend(["ole32", "oleaut32", "user32", "gdi32", "advapi32"])
+            if self.settings.compiler == "gcc":
+                self.cpp_info.components["qtAxBase"].system_libs.append("uuid")
+            _create_module("AxContainer", ["Core", "Gui", "Widgets", "AxBase"])
+            self.cpp_info.components["qtAxContainer"].includedirs = [os.path.join("include", "ActiveQt")]
+            _create_module("AxServer", ["Core", "Gui", "Widgets", "AxBase"])
+            self.cpp_info.components["qtAxServer"].includedirs = [os.path.join("include", "ActiveQt")]
+            self.cpp_info.components["qtAxServer"].system_libs.append("shell32")
 
         if not self.options.shared:
             if self.settings.os == "Windows":
@@ -1140,8 +1189,10 @@ Examples = bin/datadir/examples""")
         objects_dirs = glob.glob(os.path.join(self.package_folder, "lib", "objects-*/"))
         for object_dir in objects_dirs:
             for m in os.listdir(object_dir):
-                submodules_dir = os.path.join(object_dir, m)
                 component = "qt" + m[:m.find("_")]
+                if component not in self.cpp_info.components:
+                    continue
+                submodules_dir = os.path.join(object_dir, m)
                 for sub_dir in os.listdir(submodules_dir):
                     submodule_dir = os.path.join(submodules_dir, sub_dir)
                     obj_files = [os.path.join(submodule_dir, file) for file in os.listdir(submodule_dir)]
